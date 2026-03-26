@@ -46,6 +46,9 @@ export default function DailyTracker({ profile, risks, logs, onLogSaved }) {
       const [scoreRes, feedbackRes, alertsRes] = await Promise.all([getHealthScore(payload), getDailyFeedback(payload), getAlerts(payload)]);
       const log = { date: todayStr(), steps: +form.steps, sleep: +form.sleep, diet_score: form.diet_score, water: form.water, mood: form.mood, heart_rate: form.heart_rate || null, meals: form.meals, health_score: scoreRes.data.health_score, feedback: feedbackRes.data.feedback, alerts: alertsRes.data.alerts };
       setResult(log); onLogSaved(log);
+    } catch (error) {
+      const message = error?.response?.data?.error || "Could not save today's check-in. Please make sure the backend is running and try again.";
+      alert(message);
     } finally { setLoading(false); }
   };
 

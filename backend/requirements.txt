@@ -1,6 +1,9 @@
 flask
 flask-cors
-groq
-scikit-learn
-numpy
 python-dotenv
+numpy
+scikit-learn
+groq
+pymongo
+bcrypt
+PyJWT

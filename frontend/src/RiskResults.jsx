@@ -1,6 +1,5 @@
 import { useEffect, useState, useRef } from "react";
-import { predictRisk, getRecommendations } from "./api";
-import axios from "axios";
+import { predictRisk, getRecommendations, askHealthChat } from "./api";
 
 const RISK_CFG = {
   Low:    { color: "#10b981", bg: "rgba(16,185,129,0.07)",  border: "rgba(16,185,129,0.25)", pct: 20, icon: "✅" },
@@ -24,11 +23,24 @@ export default function RiskResults({ profile, onNext }) {
   useEffect(() => {
     predictRisk(profile)
       .then(res => {
-        setRisks(res.data); setLoading(false); setLoadingPlan(true);
-        return getRecommendations({ ...profile, ...res.data });
+        setRisks(res.data);
+        setLoading(false);
+        setLoadingPlan(true);
+        return getRecommendations({ ...profile, ...res.data })
+          .then(planRes => {
+            setPlan(parsePlan(planRes.data.recommendations));
+            setLoadingPlan(false);
+          })
+          .catch(() => {
+            setLoadingPlan(false);
+            setPlan(parsePlan("Lifestyle Tips\n- Recommendations are temporarily unavailable. Keep following the healthy habits shown in your risk factors and daily tracker."));
+          });
       })
-      .then(res => { setPlan(parsePlan(res.data.recommendations)); setLoadingPlan(false); })
-      .catch(e  => { setError(e.message); setLoading(false); });
+      .catch(e  => {
+        setError(e.message);
+        setLoading(false);
+        setLoadingPlan(false);
+      });
   }, [profile]);
 
   if (loading) return <LoadingScreen />;
@@ -182,7 +194,7 @@ function ChatModal({ profile, risks, onClose }) {
     setMessages(m => [...m, { role: "user", text: msg }]);
     setLoading(true);
     try {
-      const res = await axios.post("http://localhost:5000/api/chat", { message: msg, context: { profile, risks } });
+      const res = await askHealthChat({ message: msg, context: { profile, risks } });
       setMessages(m => [...m, { role: "assistant", text: res.data.reply }]);
     } catch {
       setMessages(m => [...m, { role: "assistant", text: "Could not connect to AI. Make sure backend is running." }]);
