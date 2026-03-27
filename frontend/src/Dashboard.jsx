@@ -1,9 +1,11 @@
+import { useState } from "react";
 import {
   XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, BarChart, Bar,
   RadarChart, Radar, PolarGrid, PolarAngleAxis,
   AreaChart, Area,
 } from "recharts";
+import { parseAlertsInsight, parseFeedbackInsight } from "./insightParsers";
 
 const MOODS = { 5: "😄", 4: "🙂", 3: "😐", 2: "😔", 1: "😩" };
 
@@ -33,6 +35,10 @@ export default function Dashboard({ logs, profile, risks, onTrack }) {
   const avg    = key => recent.length ? +(recent.reduce((s,l) => s + (l[key]||0), 0) / recent.length).toFixed(1) : 0;
   const latest = logs[logs.length - 1];
   const streak = calcStreak(logs);
+  const latestFeedback = latest?.feedback ? parseFeedbackInsight(latest.feedback, latest.feedback_parsed) : null;
+  const latestAlerts = latest?.alerts ? parseAlertsInsight(latest.alerts, latest.alerts_parsed) : null;
+  const latestWarnings = latest?.warnings || [];
+  const [spotlight, setSpotlight] = useState("wins");
 
   const radarData = [
     { subject: "Steps", A: Math.min((avg("steps")/10000)*100, 100) },
@@ -43,7 +49,8 @@ export default function Dashboard({ logs, profile, risks, onTrack }) {
   ];
 
   return (
-    <div style={{ background: "#020617", minHeight: "100vh", padding: "20px 16px 90px" }}>
+    <div style={{ background: "radial-gradient(circle at top, #112136 0%, #020617 42%, #020617 100%)", minHeight: "100vh", padding: "20px 16px 90px", position: "relative", overflow: "hidden" }}>
+      <div style={{ position: "absolute", inset: 0, backgroundImage: "linear-gradient(rgba(148,163,184,0.05) 1px, transparent 1px), linear-gradient(90deg, rgba(148,163,184,0.05) 1px, transparent 1px)", backgroundSize: "30px 30px", maskImage: "linear-gradient(to bottom, rgba(0,0,0,0.5), transparent 90%)", pointerEvents: "none" }} />
       <div style={{ maxWidth: 520, margin: "0 auto", display: "flex", flexDirection: "column", gap: 14 }}>
 
         {/* Header */}
@@ -180,14 +187,53 @@ export default function Dashboard({ logs, profile, risks, onTrack }) {
             )}
 
             {/* Latest AI Feedback */}
-            {latest?.feedback && (
-              <div style={{ background: "#0f172a", border: "1.5px solid #1e293b", borderRadius: 16, padding: 18 }}>
+            {latestFeedback && (
+              <div style={{ background: "linear-gradient(180deg, rgba(15,23,42,0.95), rgba(7,14,28,0.98))", border: "1.5px solid #1e293b", borderRadius: 20, padding: 18, boxShadow: "0 16px 40px rgba(2,6,23,0.3)" }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
                   <span style={{ fontSize: 16 }}>🤖</span>
                   <span style={{ fontWeight: 700, color: "#10b981", fontSize: "0.875rem" }}>Latest AI Feedback</span>
                   <span style={{ marginLeft: "auto", fontSize: "0.65rem", color: "#475569" }}>{latest.date}</span>
                 </div>
-                <div style={{ fontSize: "0.85rem", color: "#94a3b8", whiteSpace: "pre-wrap", lineHeight: 1.65 }}>{latest.feedback}</div>
+                <div style={{
+                  background: "linear-gradient(135deg, rgba(16,185,129,0.16), rgba(14,165,233,0.08), rgba(250,204,21,0.07))",
+                  border: "1px solid rgba(16,185,129,0.18)",
+                  borderRadius: 16,
+                  padding: 14,
+                  marginBottom: 12,
+                }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, marginBottom: 6 }}>
+                    <div style={{ fontSize: "0.78rem", color: "#86efac", textTransform: "uppercase", letterSpacing: "0.08em" }}>Quick Read</div>
+                    <GlowTag text="Live insight" color="#6ee7b7" />
+                  </div>
+                  <div style={{ fontSize: "0.88rem", color: "#f8fafc", lineHeight: 1.6, fontWeight: 600 }}>{latestFeedback.headline}</div>
+                </div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 12 }}>
+                  <SpotlightChip active={spotlight === "wins"} label="Wins" onClick={() => setSpotlight("wins")} color="#34d399" />
+                  <SpotlightChip active={spotlight === "focus"} label="Focus" onClick={() => setSpotlight("focus")} color="#60a5fa" />
+                  <SpotlightChip active={spotlight === "tomorrow"} label="Tomorrow" onClick={() => setSpotlight("tomorrow")} color="#f59e0b" />
+                </div>
+                <div style={{ display: "grid", gap: 10 }}>
+                  {spotlight === "wins" && <InsightStrip title="Wins" items={latestFeedback.wins.slice(0, 3)} color="#34d399" />}
+                  {spotlight === "focus" && <InsightStrip title="Focus Next" items={latestFeedback.focus_areas.slice(0, 3)} color="#60a5fa" />}
+                  {spotlight === "tomorrow" && <InsightStrip title="Tomorrow" items={(latestAlerts?.suggestions || []).slice(0, 3)} color="#f59e0b" />}
+                </div>
+              </div>
+            )}
+
+            {!!latestWarnings.length && (
+              <div style={{ background: "linear-gradient(135deg, rgba(120,53,15,0.24), rgba(15,23,42,0.98))", border: "1.5px solid rgba(245,158,11,0.22)", borderRadius: 18, padding: 16 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                  <span style={{ fontSize: 16 }}>🚨</span>
+                  <span style={{ fontWeight: 700, color: "#fcd34d", fontSize: "0.86rem" }}>Health Attention Panel</span>
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  {latestWarnings.slice(0, 2).map((warning, index) => (
+                    <div key={`${warning.title}-${index}`} style={{ padding: "10px 12px", borderRadius: 12, background: "rgba(2,6,23,0.32)", border: "1px solid rgba(245,158,11,0.14)" }}>
+                      <div style={{ fontSize: "0.78rem", color: "#f8fafc", fontWeight: 700, marginBottom: 4 }}>{warning.title}</div>
+                      <div style={{ fontSize: "0.76rem", color: "#fde68a", lineHeight: 1.5 }}>{warning.detail}</div>
+                    </div>
+                  ))}
+                </div>
               </div>
             )}
           </>
@@ -219,5 +265,64 @@ function EmptyState({ onTrack }) {
         Log Your First Day
       </button>
     </div>
+  );
+}
+
+function InsightStrip({ title, items, color }) {
+  if (!items?.length) return null;
+
+  return (
+    <div style={{ border: "1px solid #1e293b", borderRadius: 14, padding: 12, background: "#0a0f1e" }}>
+      <div style={{ fontSize: "0.72rem", color, fontWeight: 700, marginBottom: 8 }}>{title}</div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {items.map((item, index) => (
+          <div key={`${title}-${index}`} style={{ display: "flex", gap: 8 }}>
+            <span style={{ width: 8, height: 8, borderRadius: "50%", background: color, marginTop: 6, flexShrink: 0 }} />
+            <span style={{ fontSize: "0.82rem", color: "#cbd5e1", lineHeight: 1.55 }}>{item}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function GlowTag({ text, color }) {
+  return (
+    <span style={{
+      display: "inline-flex",
+      alignItems: "center",
+      gap: 6,
+      padding: "6px 10px",
+      borderRadius: 999,
+      border: `1px solid ${color}33`,
+      background: `${color}14`,
+      color,
+      fontSize: "0.68rem",
+      fontWeight: 700,
+    }}>
+      <span style={{ width: 7, height: 7, borderRadius: "50%", background: color, boxShadow: `0 0 14px ${color}` }} />
+      {text}
+    </span>
+  );
+}
+
+function SpotlightChip({ active, label, onClick, color }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      style={{
+        padding: "8px 12px",
+        borderRadius: 999,
+        border: active ? `1px solid ${color}55` : "1px solid #1e293b",
+        background: active ? `${color}18` : "#0a0f1e",
+        color: active ? color : "#94a3b8",
+        fontSize: "0.74rem",
+        fontWeight: 700,
+        cursor: "pointer",
+      }}
+    >
+      {label}
+    </button>
   );
 }

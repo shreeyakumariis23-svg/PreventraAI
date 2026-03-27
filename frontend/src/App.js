@@ -8,44 +8,59 @@ import Dashboard from "./Dashboard";
 import NavBar from "./NavBar";
 import "./index.css";
 
-const STORAGE_KEY = "preventra_data";
+const STORAGE_PREFIX = "preventra_data";
 
-function loadState() {
-  try { return JSON.parse(localStorage.getItem(STORAGE_KEY)) || {}; } catch { return {}; }
+function storageKeyForUser(email) {
+  return `${STORAGE_PREFIX}:${String(email || "").trim().toLowerCase()}`;
 }
-function saveState(data) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+
+function loadState(email) {
+  if (!email) return {};
+  try { return JSON.parse(localStorage.getItem(storageKeyForUser(email))) || {}; } catch { return {}; }
+}
+
+function saveState(email, data) {
+  if (!email) return;
+  localStorage.setItem(storageKeyForUser(email), JSON.stringify(data));
 }
 
 export default function App() {
   // ── Auth state ──────────────────────────────────────────────────────────
-  const [authUser, setAuthUser] = useState(() => {
-    try { return JSON.parse(localStorage.getItem("preventra_user")) || null; } catch { return null; }
-  });
+  const [authUser, setAuthUser] = useState(null);
   const [authScreen, setAuthScreen] = useState("login"); // "login" | "register"
 
   // ── App state ───────────────────────────────────────────────────────────
-  const saved = loadState();
-  const [screen, setScreen] = useState(
-    saved.profile ? (saved.risks ? "app" : "results") : "setup"
-  );
-  const [profile, setProfile] = useState(saved.profile || null);
-  const [risks, setRisks]     = useState(saved.risks || null);
-  const [logs, setLogs]       = useState(saved.logs || []);
+  const [screen, setScreen] = useState("setup");
+  const [profile, setProfile] = useState(null);
+  const [risks, setRisks]     = useState(null);
+  const [logs, setLogs]       = useState([]);
   const [tab, setTab]         = useState("dashboard");
 
   useEffect(() => {
-    saveState({ profile, risks, logs });
-  }, [profile, risks, logs]);
+    saveState(authUser?.email, { profile, risks, logs });
+  }, [authUser, profile, risks, logs]);
 
   // ── Auth handlers ────────────────────────────────────────────────────────
-  const handleAuthSuccess = (user) => setAuthUser(user);
+  const handleAuthSuccess = (user) => {
+    setAuthUser(user);
+    const saved = loadState(user.email);
+    setProfile(saved.profile || null);
+    setRisks(saved.risks || null);
+    setLogs(saved.logs || []);
+    setScreen(saved.profile ? (saved.risks ? "app" : "results") : "setup");
+    setTab("dashboard");
+  };
 
   const handleLogout = () => {
     localStorage.removeItem("preventra_token");
     localStorage.removeItem("preventra_user");
     setAuthUser(null);
     setAuthScreen("login");
+    setProfile(null);
+    setRisks(null);
+    setLogs([]);
+    setScreen("setup");
+    setTab("dashboard");
   };
 
   // ── App handlers ─────────────────────────────────────────────────────────
@@ -58,7 +73,7 @@ export default function App() {
     });
   };
   const handleReset = () => {
-    localStorage.removeItem(STORAGE_KEY);
+    if (authUser?.email) localStorage.removeItem(storageKeyForUser(authUser.email));
     setProfile(null); setRisks(null); setLogs([]);
     setScreen("setup");
   };

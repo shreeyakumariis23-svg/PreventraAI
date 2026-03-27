@@ -19,16 +19,20 @@ export default function RiskResults({ profile, onNext }) {
   const [loadingPlan, setLoadingPlan] = useState(false);
   const [error, setError]         = useState("");
   const [chatOpen, setChatOpen]   = useState(false);
+  const [simulator, setSimulator] = useState(() => createSimulatorState(profile));
+  const [simulatedRisks, setSimulatedRisks] = useState(null);
+  const [simLoading, setSimLoading] = useState(false);
 
   useEffect(() => {
     predictRisk(profile)
       .then(res => {
         setRisks(res.data);
+        setSimulatedRisks(res.data);
         setLoading(false);
         setLoadingPlan(true);
         return getRecommendations({ ...profile, ...res.data })
           .then(planRes => {
-            setPlan(parsePlan(planRes.data.recommendations));
+            setPlan(parsePlan(planRes.data.recommendations, planRes.data.recommendations_parsed));
             setLoadingPlan(false);
           })
           .catch(() => {
@@ -43,8 +47,36 @@ export default function RiskResults({ profile, onNext }) {
       });
   }, [profile]);
 
+  useEffect(() => {
+    setSimulator(createSimulatorState(profile));
+  }, [profile]);
+
+  useEffect(() => {
+    if (!risks) return;
+    if (isSameSimulator(profile, simulator)) {
+      setSimulatedRisks(risks);
+      return;
+    }
+
+    const timer = setTimeout(async () => {
+      setSimLoading(true);
+      try {
+        const res = await predictRisk(buildSimulatedProfile(profile, simulator));
+        setSimulatedRisks(res.data);
+      } catch {
+        setSimulatedRisks(risks);
+      } finally {
+        setSimLoading(false);
+      }
+    }, 350);
+
+    return () => clearTimeout(timer);
+  }, [profile, risks, simulator]);
+
   if (loading) return <LoadingScreen />;
   if (error)   return <ErrorScreen message={error} />;
+
+  const explainability = buildExplainability(profile, risks);
 
   return (
     <div style={{ background: "#020617", minHeight: "100vh", padding: "20px 16px 90px" }}>
@@ -84,6 +116,18 @@ export default function RiskResults({ profile, onNext }) {
 
         {/* Risk Factor Grid */}
         <RiskFactors profile={profile} />
+
+        <ExplainabilityCard explainability={explainability} />
+
+        <SimulationCard
+          profile={profile}
+          simulator={simulator}
+          onChange={(key, value) => setSimulator((current) => ({ ...current, [key]: value }))}
+          currentRisks={risks}
+          simulatedRisks={simulatedRisks || risks}
+          loading={simLoading}
+          onReset={() => setSimulator(createSimulatorState(profile))}
+        />
 
         {/* AI Plan */}
         <div style={{ background: "#0f172a", border: "1.5px solid #1e293b", borderRadius: 16, padding: 18 }}>
@@ -238,18 +282,200 @@ function ChatModal({ profile, risks, onClose }) {
   );
 }
 
-function parsePlan(text) {
+function parsePlan(text, parsedPayload) {
+  if (parsedPayload?.sections?.length) {
+    const iconMap = {
+      "Calorie Target": "🔥",
+      "Diet Plan": "🥗",
+      "Exercise Routine": "🏃",
+      "Lifestyle Tips": "💡",
+    };
+    return parsedPayload.sections.map((section) => ({
+      title: section.title,
+      icon: iconMap[section.title] || "•",
+      items: (section.items || []).filter(Boolean).slice(0, 6),
+    }));
+  }
+
   return [
+    { title: "Calorie Target",   icon: "🔥" },
     { title: "Diet Plan",        icon: "🥗" },
     { title: "Exercise Routine", icon: "🏃" },
     { title: "Lifestyle Tips",   icon: "💡" },
   ].map(({ title, icon }) => {
-    const regex = new RegExp(`${title}[:\\s]*([\\s\\S]*?)(?=Diet Plan|Exercise Routine|Lifestyle Tips|$)`, "i");
+    const regex = new RegExp(`${title}[:\\s]*([\\s\\S]*?)(?=Calorie Target|Diet Plan|Exercise Routine|Lifestyle Tips|$)`, "i");
     const match = text.match(regex);
     const raw = match ? match[1] : text;
-    const items = raw.split("\n").map(l => l.replace(/^[-•*\d.]+\s*/, "").trim()).filter(l => l.length > 10).slice(0, 6);
+    const items = raw
+      .split("\n")
+      .map((line) => line.replace(/\*\*/g, "").replace(/^[-•*\d.]+\s*/, "").trim())
+      .filter((line) => line.length > 10)
+      .slice(0, 6);
     return { title, icon, items: items.length ? items : [raw.trim().slice(0, 200)] };
   });
+}
+
+function createSimulatorState(profile) {
+  return {
+    weight: profile.weight,
+    sleep_hours: profile.sleep_hours,
+    diet_score: profile.diet_score,
+    activity_level: profile.activity_level,
+  };
+}
+
+function isSameSimulator(profile, simulator) {
+  return (
+    Number(simulator.weight) === Number(profile.weight) &&
+    Number(simulator.sleep_hours) === Number(profile.sleep_hours) &&
+    Number(simulator.diet_score) === Number(profile.diet_score) &&
+    Number(simulator.activity_level) === Number(profile.activity_level)
+  );
+}
+
+function buildSimulatedProfile(profile, simulator) {
+  const bmi = +(Number(simulator.weight) / ((Number(profile.height) / 100) ** 2)).toFixed(1);
+  return {
+    ...profile,
+    weight: Number(simulator.weight),
+    sleep_hours: Number(simulator.sleep_hours),
+    diet_score: Number(simulator.diet_score),
+    activity_level: Number(simulator.activity_level),
+    bmi,
+  };
+}
+
+function buildExplainability(profile, risks) {
+  const riskDrivers = (disease) => {
+    const drivers = [];
+    if (profile.bmi >= (disease === "diabetes" ? 27 : 25)) drivers.push({ label: "BMI above target range", impact: "high" });
+    if (profile.activity_level <= 1) drivers.push({ label: "Low physical activity", impact: "medium" });
+    if (profile.sleep_hours < 6) drivers.push({ label: "Sleep below 6 hours", impact: "medium" });
+    if (profile.family_history) drivers.push({ label: "Family history present", impact: "high" });
+    if (profile.diet_score <= 4) drivers.push({ label: "Diet quality needs work", impact: "medium" });
+    if (profile.stress_level >= 7 && disease === "hypertension") drivers.push({ label: "High stress load", impact: "medium" });
+    if (profile.smoking && disease === "hypertension") drivers.push({ label: "Smoking raises BP strain", impact: "high" });
+    if ((profile.conditions || []).some((condition) => condition !== "None")) drivers.push({ label: "Existing conditions add complexity", impact: "medium" });
+
+    if (!drivers.length) drivers.push({ label: "Most core lifestyle markers are in a safer range", impact: "low" });
+    return drivers.slice(0, 4);
+  };
+
+  return [
+    { title: "Diabetes", risk: risks?.diabetes_risk, drivers: riskDrivers("diabetes") },
+    { title: "Hypertension", risk: risks?.hypertension_risk, drivers: riskDrivers("hypertension") },
+  ];
+}
+
+function ExplainabilityCard({ explainability }) {
+  return (
+    <div style={{ background: "linear-gradient(180deg, rgba(15,23,42,0.96), rgba(8,15,31,0.98))", border: "1.5px solid #1e293b", borderRadius: 18, padding: 18 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14 }}>
+        <span style={{ fontSize: 18 }}>🧠</span>
+        <span style={{ fontSize: "0.92rem", fontWeight: 700, color: "#f8fafc" }}>Why These Risks?</span>
+      </div>
+      <div style={{ display: "grid", gap: 12 }}>
+        {explainability.map((item) => (
+          <div key={item.title} style={{ border: "1px solid #1e293b", borderRadius: 14, padding: 14, background: "#0a0f1e" }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 10 }}>
+              <div style={{ fontSize: "0.84rem", fontWeight: 700, color: "#f8fafc" }}>{item.title}</div>
+              <RiskBadge risk={item.risk} />
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {item.drivers.map((driver, index) => (
+                <div key={`${driver.label}-${index}`} style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
+                  <span style={{ width: 8, height: 8, borderRadius: "50%", background: driver.impact === "high" ? "#ef4444" : driver.impact === "medium" ? "#eab308" : "#10b981", marginTop: 6, flexShrink: 0 }} />
+                  <div style={{ fontSize: "0.8rem", color: "#cbd5e1", lineHeight: 1.55 }}>{driver.label}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function SimulationCard({ profile, simulator, onChange, currentRisks, simulatedRisks, loading, onReset }) {
+  const projectedProfile = buildSimulatedProfile(profile, simulator);
+  const activityLabels = ["Sedentary", "Light", "Moderate", "Active"];
+
+  return (
+    <div style={{ background: "linear-gradient(135deg, rgba(14,116,144,0.18), rgba(15,23,42,0.96))", border: "1.5px solid rgba(34,211,238,0.18)", borderRadius: 18, padding: 18 }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 14 }}>
+        <div>
+          <div style={{ fontSize: "0.95rem", fontWeight: 700, color: "#f8fafc" }}>Risk Scenario Lab</div>
+          <div style={{ fontSize: "0.74rem", color: "#94a3b8", marginTop: 2 }}>Try changes and see how your risk could move.</div>
+        </div>
+        <button onClick={onReset} style={{ padding: "8px 12px", borderRadius: 10, border: "1px solid rgba(34,211,238,0.18)", background: "#0a0f1e", color: "#67e8f9", fontSize: "0.76rem", fontWeight: 700, cursor: "pointer" }}>
+          Reset
+        </button>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 14 }}>
+        <SimulatorMetric label="Projected BMI" value={projectedProfile.bmi} />
+        <SimulatorMetric label="Activity Mode" value={activityLabels[simulator.activity_level]} />
+      </div>
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 12, marginBottom: 16 }}>
+        <SimSlider label="Weight" value={simulator.weight} min={Math.max(35, profile.weight - 20)} max={Math.min(180, profile.weight + 20)} step={1} suffix="kg" onChange={(value) => onChange("weight", value)} />
+        <SimSlider label="Sleep" value={simulator.sleep_hours} min={4} max={10} step={0.5} suffix="h" onChange={(value) => onChange("sleep_hours", value)} />
+        <SimSlider label="Diet Quality" value={simulator.diet_score} min={1} max={10} step={1} suffix="/10" onChange={(value) => onChange("diet_score", value)} />
+        <SimSlider label="Activity Level" value={simulator.activity_level} min={0} max={3} step={1} suffix={` · ${activityLabels[simulator.activity_level]}`} onChange={(value) => onChange("activity_level", value)} />
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+        <ProjectedRiskCard title="Diabetes" current={currentRisks?.diabetes_risk} projected={simulatedRisks?.diabetes_risk} loading={loading} />
+        <ProjectedRiskCard title="Hypertension" current={currentRisks?.hypertension_risk} projected={simulatedRisks?.hypertension_risk} loading={loading} />
+      </div>
+    </div>
+  );
+}
+
+function SimSlider({ label, value, min, max, step, suffix, onChange }) {
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
+        <span style={{ fontSize: "0.78rem", color: "#cbd5e1" }}>{label}</span>
+        <span style={{ fontSize: "0.78rem", color: "#67e8f9", fontWeight: 700 }}>{value}{suffix}</span>
+      </div>
+      <input type="range" min={min} max={max} step={step} value={value} onChange={(e) => onChange(+e.target.value)} style={{ width: "100%", accentColor: "#22d3ee" }} />
+    </div>
+  );
+}
+
+function ProjectedRiskCard({ title, current, projected, loading }) {
+  return (
+    <div style={{ background: "#0a0f1e", border: "1px solid #1e293b", borderRadius: 14, padding: 14 }}>
+      <div style={{ fontSize: "0.78rem", color: "#94a3b8", marginBottom: 10 }}>{title}</div>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        <RiskBadge risk={current} />
+        <span style={{ color: "#475569", fontSize: "0.75rem" }}>→</span>
+        <RiskBadge risk={projected} />
+      </div>
+      <div style={{ fontSize: "0.72rem", color: "#67e8f9", marginTop: 8 }}>
+        {loading ? "Updating projection..." : current === projected ? "No change yet" : "Projected improvement/risk shift detected"}
+      </div>
+    </div>
+  );
+}
+
+function RiskBadge({ risk }) {
+  const cfg = RISK_CFG[risk] || RISK_CFG.Low;
+  return (
+    <span style={{ fontSize: "0.68rem", fontWeight: 700, padding: "4px 10px", borderRadius: 999, background: cfg.bg, color: cfg.color, border: `1px solid ${cfg.border}` }}>
+      {risk || "Unknown"}
+    </span>
+  );
+}
+
+function SimulatorMetric({ label, value }) {
+  return (
+    <div style={{ background: "#0a0f1e", border: "1px solid #1e293b", borderRadius: 12, padding: 12 }}>
+      <div style={{ fontSize: "0.68rem", color: "#64748b", marginBottom: 4 }}>{label}</div>
+      <div style={{ fontSize: "1rem", fontWeight: 700, color: "#f8fafc" }}>{value}</div>
+    </div>
+  );
 }
 
 export function LoadingScreen() {

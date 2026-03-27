@@ -6,6 +6,7 @@ import bcrypt
 import jwt
 import datetime
 from functools import wraps
+import re
 
 import numpy as np
 from dotenv import load_dotenv
@@ -143,22 +144,175 @@ def groq_chat(prompt: str, system: str = None, max_tokens: int = 1024) -> str:
     return res.choices[0].message.content
 
 
+def clean_bullet_line(line):
+    cleaned = str(line or "")
+    cleaned = cleaned.replace("**", "").replace("__", "")
+    cleaned = re.sub(r"`+", "", cleaned)
+    cleaned = re.sub(r"^\s*(?:[-*•]+|\d+[.)])\s*", "", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
+
+
+def split_lines(text):
+    return [line.strip() for line in str(text or "").splitlines() if line.strip()]
+
+
+def parse_sectioned_text(text, sections):
+    parsed = {section: [] for section in sections}
+    current = None
+
+    for raw_line in split_lines(text):
+        line = raw_line.rstrip(":").strip()
+        matched = None
+        for section in sections:
+            if line.lower() == section.lower():
+                matched = section
+                break
+        if matched:
+            current = matched
+            continue
+        if current:
+            cleaned = clean_bullet_line(raw_line)
+            if cleaned:
+                parsed[current].append(cleaned)
+
+    return parsed
+
+
+def pick_first_sentence(text, fallback):
+    source = clean_bullet_line(str(text or "").replace("\n", " "))
+    if not source:
+        return fallback
+    parts = re.split(r"(?<=[.!?])\s+", source)
+    sentence = (parts[0] if parts else source).strip()
+    return sentence[:180]
+
+
+def build_feedback_payload(text):
+    sections = ["Headline", "Wins", "Focus Areas", "Watchouts", "Tomorrow Plan"]
+    parsed = parse_sectioned_text(text, sections)
+    lines = [clean_bullet_line(line) for line in split_lines(text)]
+
+    headline = parsed["Headline"][0] if parsed["Headline"] else pick_first_sentence(text, "Your daily report is ready.")
+    headline = re.sub(r"^(Headline|Wins|Focus Areas|Watchouts|Tomorrow Plan)\s*[:.-]?\s*", "", headline, flags=re.I).strip()
+    wins = parsed["Wins"][:4]
+    focus = parsed["Focus Areas"][:4]
+    watchouts = parsed["Watchouts"][:3]
+    tomorrow = parsed["Tomorrow Plan"][:4]
+
+    if not wins:
+        wins = [line for line in lines if any(word in line.lower() for word in ["good", "great", "solid", "well", "keep"])][:3]
+    if not focus:
+        focus = [line for line in lines if any(word in line.lower() for word in ["try", "aim", "improve", "increase", "reduce"])][:4]
+    if not watchouts:
+        watchouts = [line for line in lines if any(word in line.lower() for word in ["concerning", "warning", "doctor", "elevated", "unusual"])][:3]
+    if not tomorrow:
+        tomorrow = focus[:3]
+
+    return {
+        "raw": text,
+        "headline": headline,
+        "wins": wins,
+        "focus_areas": focus,
+        "watchouts": watchouts,
+        "tomorrow_plan": tomorrow,
+    }
+
+
+def build_alerts_payload(text):
+    suggestions = [clean_bullet_line(line) for line in split_lines(text)]
+    suggestions = [line for line in suggestions if line][:5]
+    return {
+        "raw": text,
+        "headline": pick_first_sentence(text, "Tomorrow's suggestions are ready."),
+        "suggestions": suggestions,
+    }
+
+
+def normalize_plan_items(raw_lines, max_items=5):
+    items = []
+    current = ""
+
+    for raw_line in raw_lines:
+        cleaned = clean_bullet_line(re.sub(r"\*\*", "", raw_line))
+        if not cleaned:
+            continue
+
+        is_new_item = bool(re.match(r"^\s*(?:[-*•]+|\d+[.)])\s*", raw_line)) or not current
+        if is_new_item:
+            if current:
+                items.append(current.strip(" -:"))
+            current = cleaned
+        else:
+            current = f"{current} {cleaned}".strip()
+
+    if current:
+        items.append(current.strip(" -:"))
+
+    return [item for item in items if len(item) > 4][:max_items]
+
+
+def build_recommendations_payload(text):
+    sections = ["Calorie Target", "Diet Plan", "Exercise Routine", "Lifestyle Tips"]
+    raw_sections = {section: [] for section in sections}
+    current = None
+
+    for raw_line in str(text or "").splitlines():
+        line = raw_line.strip().rstrip(":").strip()
+        matched = next((section for section in sections if line.lower() == section.lower()), None)
+        if matched:
+            current = matched
+            continue
+        if current and raw_line.strip():
+            raw_sections[current].append(raw_line)
+
+    parsed_sections = []
+    for section in sections:
+        items = normalize_plan_items(raw_sections[section], max_items=6)
+        if not items and section == "Lifestyle Tips":
+            items = ["Review progress weekly and consult a doctor if symptoms persist."]
+        parsed_sections.append({
+            "title": section,
+            "items": items,
+        })
+
+    return {
+        "raw": text,
+        "sections": parsed_sections,
+    }
+
+
 def generate_plan_fallback(d):
     activity = int(d.get("activity_level", 0))
-    exercise = "30 minutes of brisk walking 5 days a week"
-    if activity >= 2:
-        exercise = "45 minutes of mixed cardio and strength training 4-5 days a week"
+    weight = float(d.get("weight", 70) or 70)
+    height_m = max(float(d.get("height", 170) or 170) / 100, 1.3)
+    age = int(d.get("age", 30) or 30)
+    gender = str(d.get("gender", "")).lower()
+    activity_multiplier = [1.2, 1.35, 1.5, 1.7][min(max(activity, 0), 3)]
+    bmr = 10 * weight + 6.25 * (height_m * 100) - 5 * age + (5 if gender == "male" else -161)
+    maintenance_calories = round(bmr * activity_multiplier)
+    bmi = float(d.get("bmi", 0) or 0)
+    calorie_target = maintenance_calories - 250 if bmi >= 25 else maintenance_calories + 150 if bmi and bmi < 18.5 else maintenance_calories
     diet_score = float(d.get("diet_score", 5))
     carb_note = "reduce sugary drinks and refined carbs" if diet_score <= 6 else "keep portions balanced and protein high"
+    workout_mode = "calisthenics-focused home workouts" if activity <= 1 else "gym-based strength sessions with light cardio finishers"
     return (
+        "Calorie Target\n"
+        f"- Estimated daily calorie target: about {calorie_target} kcal/day based on your age, body size, and activity level.\n"
+        f"- Aim for roughly {'a mild calorie deficit for fat loss and metabolic control' if bmi >= 25 else 'maintenance calories with steady protein intake' if bmi >= 18.5 else 'a mild calorie surplus to support healthy weight gain'}.\n"
+        "- Prioritize protein in each meal and avoid getting most calories from sugary snacks or drinks.\n\n"
         "Diet Plan\n"
-        f"- Start the day with oats, poha, or eggs and fruit.\n"
-        f"- For lunch and dinner, build plates around dal, sabzi, curd, and roti or brown rice.\n"
+        f"- Breakfast: start with oats, poha, besan chilla, or eggs with fruit and a protein source.\n"
+        f"- Lunch: build a plate with dal or lean protein, sabzi, salad, curd, and roti or brown rice.\n"
+        f"- Dinner: keep it lighter with paneer, tofu, chicken, dal, soup, and vegetables.\n"
+        f"- Snacks: use fruit, roasted chana, sprouts, curd, or nuts in controlled portions.\n"
         f"- {carb_note.capitalize()}.\n\n"
         "Exercise Routine\n"
-        f"- Aim for {exercise}.\n"
-        "- Add 5-10 minutes of stretching after each session.\n"
-        "- Try to stay active after meals with a short walk.\n\n"
+        f"- Follow {workout_mode} 4-5 days per week.\n"
+        "- Gym option: do squats or leg press, chest press or push-ups, rows or lat pulldowns, shoulder press, and 10-15 minutes incline walking.\n"
+        "- Calisthenics option: do push-ups, bodyweight squats, lunges, glute bridges, planks, and assisted pull-up or resistance-band rows.\n"
+        "- Keep each session around 35-50 minutes and add 5-10 minutes of stretching after training.\n"
+        "- Try a 10-minute walk after meals to support glucose control.\n\n"
         "Lifestyle Tips\n"
         f"- Target {d.get('sleep_hours', 7)}-8 hours of sleep on a consistent schedule.\n"
         f"- Drink at least {max(float(d.get('water_litres', 2)), 2):g}L of water daily.\n"
@@ -169,15 +323,27 @@ def generate_plan_fallback(d):
 
 def generate_feedback_fallback(d, mood):
     notes = [
-        f"Steps: you logged {d['steps']}, so try to get closer to {d.get('recommended_steps', 8000)} tomorrow.",
-        f"Diet quality is {d['diet_score']}/10. Keep meals balanced with protein, fiber, and fewer ultra-processed foods.",
-        f"Sleep was {d['sleep']} hours. Aim for a steady 7-8 hour window if possible.",
-        f"Water intake was {d.get('water', 2)}L. Increase gradually if you felt low on energy.",
-        f"Mood was {mood}. Use that as a signal to adjust workload, movement, and rest.",
+        "Headline",
+        f"- Your check-in shows a {mood} day with a few clear opportunities to improve tomorrow.",
+        "Wins",
+        f"- You logged your habits for the day, which is the first step toward better consistency.",
+        f"- Diet quality came in at {d['diet_score']}/10, giving us a useful signal to build on.",
+        "Focus Areas",
+        f"- Steps were {d['steps']}, so aim to move closer to {d.get('recommended_steps', 8000)} tomorrow.",
+        f"- Sleep was {d['sleep']} hours, so try to protect a steady 7-8 hour sleep window.",
+        f"- Water intake was {d.get('water', 2)}L. Add an extra glass in the morning and evening if energy felt low.",
+        "Watchouts",
+        f"- Mood was {mood}. If that continues for several days, reduce overload and prioritize recovery.",
+        "Tomorrow Plan",
+        "- Plan one short walk after a meal.",
+        "- Keep meals balanced with protein, fiber, and fewer ultra-processed foods.",
     ]
     if d.get("heart_rate"):
-        notes.append(f"Heart rate was {d['heart_rate']} bpm. Recheck at rest if it felt unusual.")
-    return "\n".join(f"- {note}" for note in notes[:5])
+        notes.extend([
+            "Watchouts",
+            f"- Heart rate was {d['heart_rate']} bpm. Recheck it at rest if it felt unusual.",
+        ])
+    return "\n".join(notes)
 
 
 def generate_alerts_fallback(d):
@@ -261,20 +427,28 @@ def recommendations():
     system = (
         "You are a certified Indian nutritionist and fitness coach. "
         "Give practical, culturally relevant advice using Indian foods and exercises. "
-        "Be specific, not generic. Use sections: Diet Plan, Exercise Routine, Lifestyle Tips."
+        "Be specific, not generic. "
+        "Use exactly these sections and no others: Calorie Target, Diet Plan, Exercise Routine, Lifestyle Tips. "
+        "Do not use markdown bold. Do not use nested bullets. "
+        "Keep each bullet to one line and return 3-5 bullets per section."
     )
     prompt = (
         f"Create a personalized health plan for: {profile_summary(d)}\n"
         f"Diabetes risk: {d.get('diabetes_risk', 'Unknown')}, "
         f"Hypertension risk: {d.get('hypertension_risk', 'Unknown')}.\n"
-        f"Include specific Indian meal suggestions (breakfast, lunch, dinner), "
-        f"a weekly exercise schedule, and 4-5 lifestyle tips tailored to their risk profile."
+        f"Include:\n"
+        f"1. A realistic estimated daily calorie intake target in kcal/day with a one-line reason.\n"
+        f"2. A diet plan with breakfast, lunch, dinner, and snack ideas using Indian foods.\n"
+        f"3. An exercise routine with both gym and calisthenics/bodyweight options, sets/reps or duration, and weekly frequency.\n"
+        f"4. 4-5 lifestyle tips tailored to their conditions and risk profile.\n"
+        f"Keep the plan practical for a beginner and avoid vague advice. "
+        f"Return short bullets only, not paragraphs."
     )
     try:
-        text = groq_chat(prompt, system, max_tokens=1200)
+        text = groq_chat(prompt, system, max_tokens=1400)
     except RuntimeError:
         text = generate_plan_fallback(d)
-    return jsonify({"recommendations": text})
+    return jsonify({"recommendations": text, "recommendations_parsed": build_recommendations_payload(text)})
 
 
 # ── Groq: daily feedback ─────────────────────────────────────────────────────
@@ -285,13 +459,18 @@ def feedback():
     mood = mood_labels.get(d.get("mood", 3), "okay")
     energy_labels = {5: "very high", 4: "high", 3: "moderate", 2: "low", 1: "very low"}
     energy = energy_labels.get(d.get("energy", 3), "moderate")
-    system = "You are a supportive health coach. Give honest, specific, actionable feedback. Be encouraging but direct."
+    system = (
+        "You are a supportive health coach. Give honest, specific, actionable feedback. "
+        "Be encouraging but direct. Respond using these exact sections only: "
+        "Headline, Wins, Focus Areas, Watchouts, Tomorrow Plan. "
+        "Use 1 short bullet in Headline and 2-4 bullets in each other section."
+    )
     symptoms = ", ".join(d.get("symptoms", [])) or "none"
     exercise_str = f"{d['exercise_duration']} min of {d['exercise_type']}" if d.get("exercise_type") and d.get("exercise_duration") else "none logged"
     bp_str = f"{d['bp_systolic']}/{d['bp_diastolic']} mmHg" if d.get("bp_systolic") and d.get("bp_diastolic") else "not logged"
     glucose_str = f"{d['blood_glucose']} mg/dL" if d.get("blood_glucose") else "not logged"
     prompt = (
-        f"Analyze today's health data and give 5-6 bullet point feedback:\n"
+        f"Analyze today's health data and create a concise coaching report:\n"
         f"- Steps: {d['steps']} (goal: {d.get('recommended_steps', 8000)})\n"
         f"- Exercise: {exercise_str}\n"
         f"- Meals: {d['food']}\n"
@@ -310,7 +489,7 @@ def feedback():
         text = groq_chat(prompt, system, max_tokens=1200)
     except RuntimeError:
         text = generate_feedback_fallback(d, mood)
-    return jsonify({"feedback": text})
+    return jsonify({"feedback": text, "feedback_parsed": build_feedback_payload(text)})
 
 
 # ── Health score calculation ─────────────────────────────────────────────────
@@ -339,7 +518,10 @@ def alerts():
     exercise_str = f"{d.get('exercise_duration', 0)} min of {d.get('exercise_type', 'none')}"
     bp_str = f"{d['bp_systolic']}/{d['bp_diastolic']} mmHg" if d.get("bp_systolic") and d.get("bp_diastolic") else "not logged"
     glucose_str = f"{d['blood_glucose']} mg/dL" if d.get("blood_glucose") else "not logged"
-    system = "You are a preventive health coach. Give 3 very specific, actionable suggestions for tomorrow based on today's data."
+    system = (
+        "You are a preventive health coach. Give 3-5 very specific, actionable suggestions for tomorrow based on today's data. "
+        "Return only short bullet points, one suggestion per line."
+    )
     prompt = (
         f"Today's summary — steps: {d['steps']}, exercise: {exercise_str}, "
         f"diet: {d['diet_score']}/10, sleep: {d['sleep']}h, water: {d.get('water', 2)}L, "
@@ -352,7 +534,7 @@ def alerts():
         text = groq_chat(prompt, system, max_tokens=400)
     except RuntimeError:
         text = generate_alerts_fallback(d)
-    return jsonify({"alerts": text})
+    return jsonify({"alerts": text, "alerts_parsed": build_alerts_payload(text)})
 
 
 # ── Groq: health chatbot ─────────────────────────────────────────────────────
